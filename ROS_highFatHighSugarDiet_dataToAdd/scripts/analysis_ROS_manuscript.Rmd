@@ -1,0 +1,398 @@
+---
+title: "Untitled"
+author: "Marion Leleu (from Rene Dreos)"
+date: '2023-09-01'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+
+
+#sessionInfo()
+
+```{r Load required packages }
+
+library(DESeq2)
+packageVersion("DESeq2") #‘1.34.0’
+
+library(ggplot2)
+packageVersion("ggplot2") #‘3.4.1’
+
+```
+
+
+```{r Load data}
+
+## load design object
+sampleAnno_ROS=readRDS(file="./sampleAnno_ROS.rds")
+
+## load DESeq object 
+directory <- './readCounts'
+ddsData_ROS <- DESeqDataSetFromHTSeqCount(sampleTable = sampleAnno_ROS,
+                                      directory = directory,
+                                      design = ~ Treatment )
+ddsData_ROS <- DESeq(ddsData_ROS)
+# or load directly the processed rds object
+ddsData_ROS=readRDS(file="./ddsData_ROS.rds")
+
+```
+
+
+
+```{r function my_plotPCA }
+
+## This function is a slightly modified version of DEseq2::plotPCA
+## [ https://github.com/mikelove/DESeq2/blob/devel/R/plots.R ]
+## giving the possibility to select genes based on their mean expression instead of their variance.
+
+my_plotPCA <- function(object, intgroup="condition", ntop=500, sortby="vars", returnData=FALSE, pcsToUse=1:2)
+{
+  if(sortby=="mean"){
+    print(paste0("will select Top ",ntop," genes w.r.t their means"))
+    # calculate the mean for each gene
+    rmeans <- rowMeans(assay(object))
+  
+    # select the ntop genes by variance
+    select <- order(rmeans, decreasing=TRUE)[seq_len(min(ntop, length(rmeans)))]
+  }else{
+    print(paste0("will select Top ",ntop," genes w.r.t their vars"))
+    # calculate the variance for each gene
+    rv <- rowVars(assay(object))
+  
+    # select the ntop genes by variance
+    select <- order(rv, decreasing=TRUE)[seq_len(min(ntop, length(rv)))]
+  }
+  
+
+  # perform a PCA on the data in assay(x) for the selected genes
+  pca <- prcomp(t(assay(object)[select,]))
+
+  # the contribution to the total variance for each component
+  percentVar <- pca$sdev^2 / sum( pca$sdev^2 )
+
+  if (!all(intgroup %in% names(colData(object)))) {
+    stop("the argument 'intgroup' should specify columns of colData(dds)")
+  }
+
+  intgroup.df <- as.data.frame(colData(object)[, intgroup, drop=FALSE])
+  
+  # add the intgroup factors together to create a new grouping factor
+  group <- if (length(intgroup) > 1) {
+    factor(apply( intgroup.df, 1, paste, collapse=":"))
+  } else {
+    colData(object)[[intgroup]]
+  }
+
+  # assembly the data for the plot
+  pcs <- paste0("PC", pcsToUse)
+  d <- data.frame(V1=pca$x[,pcsToUse[1]],
+                  V2=pca$x[,pcsToUse[2]],
+                  group=group, intgroup.df, name=colnames(object))
+  colnames(d)[1:2] <- pcs
+  
+  if (returnData) {
+    attr(d, "percentVar") <- percentVar[pcsToUse]
+    return(d)
+  }
+
+  ggplot(data=d, aes_string(x=pcs[1], y=pcs[2], color="group")) +
+    geom_point(size=3) + 
+    xlab(paste0(pcs[1],": ",round(percentVar[pcsToUse[1]] * 100),"% variance")) +
+      ylab(paste0(pcs[2],": ",round(percentVar[pcsToUse[2]] * 100),"% variance")) +
+        coord_fixed()
+}
+
+
+
+```
+
+
+
+
+```{r Fig 5f: PCA}
+
+#objects:
+#ddsData_ROS
+#sampleAnno_ROS
+
+NTop=500
+vsdHtseq <- DESeq2::vst(ddsData_ROS, blind=FALSE)
+
+pca.d <- my_plotPCA(vsdHtseq, intgroup=c("Treatment", "Type"), ntop=NTop, sortby="mean", returnData=FALSE) ## change the default order: here used the mean "expr"
+pca_toPlot=merge(pca.d$data, sampleAnno_ROS[,setdiff(colnames(sampleAnno_ROS),colnames(pca.d$data))], by.x=0, by.y=0, all.x=TRUE, all.y=FALSE)
+rownames(pca_toPlot) <- pca_toPlot[,'Row.names']
+pca_toPlot = pca_toPlot[,-1]
+
+mainTitle=paste0("PCA no NAC (from ",NTop," top \"expr\" genes )")
+curSubtitle="Gene monosome&Disome counts"
+
+g_pca <- ggplot(pca_toPlot, aes(PC1, PC2, col=Treatment)) +
+  geom_point(size=4) +
+  geom_text_repel(data=pca_toPlot, aes(PC1, PC2, label=Sample), col='black') +
+  labs(title = mainTitle, subtitle = paste0(curSubtitle,' (labels: sample.barcode)')) +
+  xlab(pca.d$labels$x) +
+  ylab(pca.d$labels$y) + 
+  geom_vline(xintercept = 0, col="grey50") + 
+  geom_hline(yintercept = 0,  col="grey50") +
+  theme_light()
+
+g_pca
+
+
+
+```
+
+
+
+
+```{r Fig 5g: Per-gene quantification of total signal for monosome/disome }
+
+#objects:
+# ddsData_ROS
+# sampleAnno_ROS
+
+
+## Prepare data Fig. 5g. ----
+sampleAnno_ROS$Type_Treatment=paste(sampleAnno_ROS$Type,":",sampleAnno_ROS$Treatment,sep="")
+x=setNames(sampleAnno_ROS$Type_Treatment,sampleAnno_ROS$Sample) ## !! important otherwise it will screw up the order of the groups
+
+# monosome footprints
+geneNormCounts_PFandPD_SumPerGrp = t(apply(counts(ddsData_ROS, norm=T),1,function(v){tapply(v,x[names(v)],sum)}))
+geneNormCounts_PFandPD_SumPerGrp.l=list()
+geneNormCounts_PFandPD_SumPerGrp.l[["PF"]]=geneNormCounts_PFandPD_SumPerGrp[,grep("Mono-",colnames(geneNormCounts_PFandPD_SumPerGrp))]
+geneNormCounts_PFandPD_SumPerGrp.l[["PD"]]=geneNormCounts_PFandPD_SumPerGrp[,grep("Di-",colnames(geneNormCounts_PFandPD_SumPerGrp))]
+geneNormCounts_PFandPD_SumPerGrp_mean=rowMeans(geneNormCounts_PFandPD_SumPerGrp.l$PF)
+toPlot_genesCumsum=data.frame("i"=1:length(geneNormCounts_PFandPD_SumPerGrp_mean),
+                              "curScore"=sort(geneNormCounts_PFandPD_SumPerGrp_mean,decreasing=TRUE),
+                              "cumScore"=cumsum(sort(geneNormCounts_PFandPD_SumPerGrp_mean,decreasing=TRUE)))
+total=sum(geneNormCounts_PFandPD_SumPerGrp_mean)
+toPlot_genesCumsum$cumScore_pcTotal=toPlot_genesCumsum$cumScore/total
+toPlot_genesCumsum$pcGenes=toPlot_genesCumsum$i/nrow(toPlot_genesCumsum)
+toPlot_genesCumsum_=merge(toPlot_genesCumsum,rawCounts_annots, by.x=0, by.y=0, all.x=TRUE )
+toPlot_genesCumsum_=toPlot_genesCumsum_[order(toPlot_genesCumsum_$i,decreasing = FALSE),]
+toPlot_genesCumsum=toPlot_genesCumsum_
+
+toPlot_genesCumsum_points=data.frame( "pct_totalScore"=seq(0,1,by=0.1), 
+                                 "pct_genes"=unlist(sapply(seq(0,1,by=0.1), function(x){ N=head(which(toPlot_genesCumsum$cumScore >= x*total),n=1); return(N/length(toPlot_genesCumsum$cumScore))})) 
+)
+
+## disome footprints
+geneNormCounts_PFandPD_SumPerGrp_mean_PD=rowMeans(geneNormCounts_PFandPD_SumPerGrp.l$PD)
+XX = data.frame("i"=1:length(geneNormCounts_PFandPD_SumPerGrp_mean_PD),
+                "curScore"=sort(geneNormCounts_PFandPD_SumPerGrp_mean_PD,decreasing=TRUE),
+                "cumScore"=cumsum(sort(geneNormCounts_PFandPD_SumPerGrp_mean_PD,decreasing=TRUE)) )
+XX_total=total=sum(geneNormCounts_PFandPD_SumPerGrp_mean_PD)
+XX$cumScore_pcTotal=XX$cumScore/total
+XX$pcGenes=XX$i/nrow(XX)
+XX_=merge(XX,rawCounts_annots, by.x=0, by.y=0, all.x=TRUE )
+XX=XX_[order(XX_$i,decreasing = FALSE),]
+
+
+toPlot_genesCumsum_withDisome=merge(toPlot_genesCumsum, XX[,setdiff(colnames(XX),c("genesIDs","Name","Description"))], by="Row.names",all.x=TRUE, all.y=TRUE, suffixes = c(":PF",":PD"))
+toPlot_genesCumsum_withDisome=toPlot_genesCumsum_withDisome[order(toPlot_genesCumsum_withDisome[,"i:PF"]),]
+
+x1=tail(toPlot_genesCumsum[which(toPlot_genesCumsum$cumScore_pcTotal<0.5),"pcGenes"],n=1)
+
+# diff codons
+toPlot_genesCumsum_ = merge(toPlot_genesCumsum_withDisome, genesInfosTable.toExport[,colnames(genesInfosTable.toExport)[c(2,8:10)]], by.x="genesIDs", by.y="GID", all.x=TRUE)
+toPlot_genesCumsum_$nDiffSites_PFnoNAC=rowSums(toPlot_genesCumsum_[,c("nDiffSites_enriched","nDiffSites_depleted")])
+toPlot_genesCumsum_$nDiffSites_PFnoNAC[is.na(toPlot_genesCumsum_$nDiffSites_PFnoNAC)]=0
+toPlot_genesCumsum_=toPlot_genesCumsum_[order(toPlot_genesCumsum_$nDiffSites_PFnoNAC,decreasing=TRUE),]
+
+toPlot_genesCumsum_$nDiffSites_PFnoNAC_Cum = cumsum(toPlot_genesCumsum_$nDiffSites_PFnoNAC)
+toPlot_genesCumsum_$pcDiffSitesCum_PFnoNAC=toPlot_genesCumsum_$nDiffSites_PFnoNAC_Cum/sum(toPlot_genesCumsum_$nDiffSites_PFnoNAC) # that is 310 diff sites in total 
+
+toPlot_genesCumsum_=toPlot_genesCumsum_[order(toPlot_genesCumsum_$nDiffSites_PFnoNAC,decreasing=TRUE),]
+toPlot_genesCumsum_$rank_diffSites_PFnoNAC=1:nrow(toPlot_genesCumsum_)
+toPlot_genesCumsum_$rank_diffSites_PFnoNAC_pc <- toPlot_genesCumsum_$rank_diffSites_PFnoNAC/nrow(toPlot_genesCumsum_)
+
+
+## Prepare plot Fig. 5g. ----
+
+curTitle="Per-gene quantification of total signal for monosome/disome"
+
+pp <- ggplot(toPlot_genesCumsum, aes(x=pcGenes,y=cumScore_pcTotal)) + theme_light() + ggtitle(curTitle, subtitle=paste0("out of ",nrow(toPlot_genesCumsum)," genes"))
+# monosome footprints
+pp <- pp + geom_point(col="grey33", size=0.5)
+pp <- pp + scale_y_continuous(labels = scales::label_percent()) + ylab("% total signal")
+pp <- pp + scale_x_continuous(labels = scales::label_percent()) + xlab("% genes (log10)")
+pp <- pp + geom_segment(aes(x = x1, y = -Inf, xend = x1, yend = 0.5), color="grey33", linetype = "dashed", linewidth=0.5)
+pp <- pp + geom_segment(aes(x = -Inf, y = 0.5, xend = x1, yend = 0.5), color="grey33", linetype = "dashed", linewidth=0.5)
+# disome footprints
+pp <- pp + geom_point(data=XX,aes(x=pcGenes,y=cumScore_pcTotal),col="grey89", size=0.3 )
+pp <- pp + geom_point(data=toPlot_genesCumsum_points, aes(x=pct_genes,y=pct_totalScore), size=1, col="blue")
+# diff codons
+pp <- pp + geom_point(data=toPlot_genesCumsum_, aes(x=rank_diffSites_PFnoNAC_pc,y=pcDiffSitesCum_PFnoNAC), size=1, col="orange")
+# zoom x-axis 0-5%
+pp + xlim(c(0,0.05))
+
+pdf("percentSignal_vs_percentGenes_withDisome_data.pdf")
+print(pp)
+dev.off()
+
+
+## Table S3 referring to Fig. 5g.----
+toPlot_genesCumsum_withDisome.toExport=toPlot_genesCumsum_[,1:ncol(toPlot_genesCumsum_)]
+toPlot_genesCumsum_withDisome.toExport=toPlot_genesCumsum_withDisome.toExport[,c(1,3:7,10:14,8:9,15:22)]
+colnames(toPlot_genesCumsum_withDisome.toExport)=c("gID",
+                                                   "Mono-:rank","Mono-:normCount","Mono-:normCount_cum","Mono-:%total","Mono-:%genes",
+                                                   "Di-:rank","Di-:normCount","Di-:normCount_cum","Di-:%total","Di-:%genes",
+                                                   "Name","Description","nCodons","nDiffSites_enriched","nDiffSites_depleted",
+                                                   "nDiffSites","nDiffSites_cum","pcDiffSites_cum","rank_diffSites","rank_diffSites_pc")
+
+outfile="percentSignal_vs_percentGenes_withDisome_data.tsv" 
+write.table(toPlot_genesCumsum_withDisome.toExport, file=outfile, quote=FALSE, sep="\t", row.names = FALSE)
+
+
+```
+
+
+
+```{r Fig. S8a: Metagene analysis of monosome footprints}
+
+# dependency :
+# call_startCodon_dat.sh
+
+
+### Start codon ----
+startChow1 <- read.table("./chipCor/PF43.ATCGT.vs.StartCodon.dat", header = TRUE)
+startChow2 <- read.table("./chipCor/PF43.AGCTA.vs.StartCodon.dat", header = TRUE)
+startChow3 <- read.table("./chipCor/PF43.CGTAA.vs.StartCodon.dat", header = TRUE)
+
+startHfd1 <- read.table("./chipCor/PF43.CTAGA.vs.StartCodon.dat", header = TRUE)
+startHfd2 <- read.table("./chipCor/PF43.GATCA.vs.StartCodon.dat", header = TRUE)
+startHfd3 <- read.table("./chipCor/PF43.GCATA.vs.StartCodon.dat", header = TRUE)
+
+# Take away very strong genes (outliers)
+highGene <- which(rowSums(startChow1) > 1000 | rowSums(startChow2) > 1000 | rowSums(startChow3) > 1000 | rowSums(startHfd1) > 1000 | rowSums(startHfd2) > 1000 | rowSums(startHfd3) > 1000)
+startChow1 <- startChow1[-highGene,]
+startChow2 <- startChow2[-highGene,]
+startChow3 <- startChow3[-highGene,]
+startHfd1 <- startHfd1[-highGene,]
+startHfd2 <- startHfd2[-highGene,]
+startHfd3 <- startHfd3[-highGene,]
+
+
+startChow <- (colSums(startChow1) + colSums(startChow2) + colSums(startChow3)) / 3
+startHfd <- (colSums(startHfd1) + colSums(startHfd2) + colSums(startHfd3)) / 3
+
+startData <- data.frame(Counts = c(startChow, startHfd),
+                        Position = rep(-100:1000, 4),
+                        Type = rep(c("Chow", "HFHS"),
+                                   each = length(startChow))
+                        )
+
+startP <- ggplot(startData, aes(x = Position, y = Counts, col = Type)) +
+    geom_line() +
+    scale_color_manual(values=setNames(c("grey","pink"),c("Chow","HFHS"))) + 
+    xlim(-30, 50) +
+    ylim(0, 3700) +
+    labs(x = "Position relative to start site (nt)",
+         col = "") +
+    theme_cowplot(14) +
+    theme(legend.position = c(0.05, 0.9))
+startP
+#ggsave("startSiteAllGenes.pdf", startP, width = 10)
+
+
+
+### Stop codon ----
+stopChow1 <- read.table("../chipCor/PF43.ATCGT.vs.StopCodon.dat", header = TRUE)
+stopChow2 <- read.table("../chipCor/PF43.AGCTA.vs.StopCodon.dat", header = TRUE)
+stopChow3 <- read.table("../chipCor/PF43.CGTAA.vs.StopCodon.dat", header = TRUE)
+
+stopHfd1 <- read.table("../chipCor/PF43.CTAGA.vs.StopCodon.dat", header = TRUE)
+stopHfd2 <- read.table("../chipCor/PF43.GATCA.vs.StopCodon.dat", header = TRUE)
+stopHfd3 <- read.table("../chipCor/PF43.GCATA.vs.StopCodon.dat", header = TRUE)
+
+stopChow1 <- stopChow1[-highGene,]
+stopChow2 <- stopChow2[-highGene,]
+stopChow3 <- stopChow3[-highGene,]
+stopHfd1 <- stopHfd1[-highGene,]
+stopHfd2 <- stopHfd2[-highGene,]
+stopHfd3 <- stopHfd3[-highGene,]
+
+stopChow <- (colSums(stopChow1) + colSums(stopChow2) + colSums(stopChow3)) / 3
+stopHfd <- (colSums(stopHfd1) + colSums(stopHfd2) + colSums(stopHfd3)) / 3
+
+stopData <- data.frame(Counts = c(stopChow, stopHfd),
+                        Position = rep(-1000:100, 2),
+                       Type = rep(c("Chow", "HFHS"),
+                                  each = length(stopChow))
+                       )
+
+stopP <- ggplot(stopData, aes(x = Position, y = Counts, col = Type)) +
+    geom_line() +
+    scale_color_manual(values=setNames(c("grey","pink"),c("Chow","HFHS"))) + 
+    xlim(-50, 30) +
+    ylim(0, 3700) +
+    labs(x = "Position relative to stop site (nt)",
+         col = "") +
+    theme_cowplot(14) +
+    theme(legend.position = c(0.05, 0.9))
+stopP
+#ggsave("stopSiteAllGenes.pdf", stopP, width = 10)
+
+
+
+```
+
+
+
+```{r Fig. S8c}
+
+# objects:
+# codonCounts
+
+
+noTreatSites <- rownames(codonCounts)[which(codonCounts$padj < 0.05)] #310
+noTreatSites_up <- rownames(codonCounts)[which(codonCounts$padj < 0.05 & codonCounts$oddRatios>0)] # 150 enriched
+noTreatSites_down <- rownames(codonCounts)[which(codonCounts$padj < 0.05 & codonCounts$oddRatios<0)] # 160 depleted
+
+### Volcano plot ----
+p1 <- ggplot(codonCounts, aes(x = -log10(padj), y = oddRatios)) +
+    geom_point(alpha = 1, col = "lightgray", size = 0.5) +
+    geom_point(data = subset(codonCounts[noTreatSites_up,]),
+               col = "darkorange", size = 0.8) +
+    geom_point(data = subset(codonCounts[noTreatSites_down,]),
+               col = "yellow3", size = 0.8) +
+    xlim(0, 150) +
+    geom_hline(yintercept=0) +
+    labs(title = "HFHS vs Chow",
+         y = "log2[oddRatio]",
+         x = "log10[adjusted P]") +
+    theme_cowplot(12)
+
+
+## MA-plot ----
+codonCounts$mean=0.5*(codonCounts$HFD+codonCounts$Chow)
+p2 <- ggplot(codonCounts, aes(x = mean, y = oddRatios)) +
+    geom_point(alpha = 1, col = "lightgray", size = 0.2) +
+    geom_point(data = subset(codonCounts[noTreatSites_up,]),
+               col = "darkorange", size = 0.8) +
+    geom_point(data = subset(codonCounts[noTreatSites_down,]),
+               col = "yellow3", size = 0.8) +
+    labs(title = "HFHS vs Chow",
+         subtitle = paste0( length(noTreatSites)," significant diff codons: ",length(noTreatSites_up)," enrichedCod, ", length(noTreatSites_down), " depletedCod"),
+         y = "log2[oddRatio]",
+         x = "mean signal") +
+    theme_cowplot(12)
+p2 <- p2 +  geom_hline(yintercept = 0, alpha=0.5) 
+p2 <- p2 + scale_x_log10()
+p2 <- p2 + annotate(geom="text", x=1000, y=1.2, label=paste0(length(noTreatSites_up)," increased"),color="darkorange", hjust= -0.1, vjust=-1)
+p2 <- p2 + annotate(geom="text", x=1000, y=-1.2, label=paste0(length(noTreatSites_down)," decreased"),color="yellow3", hjust= -0.1, vjust=-1)
+
+cowplot::plot_grid(p1, p2, rel_widths = c(0.3, 0.7))
+
+
+```
+
